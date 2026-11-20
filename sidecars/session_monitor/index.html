@@ -797,7 +797,7 @@
           })
           .join('');
         const allBtn = visibleKinds.length > 1
-          ? `<button type="button" class="chip${allSelected ? ' active' : ''}" data-preset="${allSelected ? 'milestones' : 'all'}" title="${allSelected ? 'Switch to milestones only' : 'Show all event types'}">${allSelected ? 'Milestones' : 'All'}</button>`
+          ? `<button type="button" class="chip${allSelected ? ' active' : ''}" data-preset="${allSelected ? 'milestones' : 'all'}" title="${allSelected ? 'Reset to default filters (Summary, Progress, User, Compact)' : 'Show all event types'}">All</button>`
           : '';
         filterBarEl.innerHTML = chipsHtml + allBtn;
       }
