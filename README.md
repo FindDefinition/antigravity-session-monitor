@@ -4,6 +4,10 @@ A lightweight, zero-dependency **Google Antigravity** plugin providing a live ri
 
 Reads `<appData>/brain/<conversationId>/.system_generated/logs/transcript.jsonl` read-only with **zero LLM calls** and **zero external npm dependencies**.
 
+<p align="center">
+  <img src="assets/screenshot.png" alt="Antigravity Session Monitor Sidebar" width="380" />
+</p>
+
 ## Features
 
 - **Compact Context Bar:** Live progress bar toward the ~500K auto-compaction threshold, active model pill, compaction & call counts, and an instant hover tooltip with exact input/output token counts.
