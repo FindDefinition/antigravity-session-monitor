@@ -1,0 +1,7 @@
+{
+  "name": "session-monitor",
+  "displayName": "Session Monitor",
+  "version": "0.1.0",
+  "description": "Right-sidebar live monitor for context length, per-model token usage, historical TPS, cache hit rate, and filterable activity timeline, plus an always-on rule for concise milestone progress updates.",
+  "repository": "https://github.com/FindDefinition/antigravity-session-monitor"
+}
