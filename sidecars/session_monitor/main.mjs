@@ -43,10 +43,14 @@ function findAppDataDirs() {
 }
 
 function resolveTranscriptPath(convId, full = false) {
-  const fname = full ? 'transcript_full.jsonl' : 'transcript.jsonl';
+  const candidates = full
+    ? ['transcript_full.jsonl', 'transcript.jsonl']
+    : ['transcript_full.jsonl', 'transcript.jsonl'];
   for (const appData of findAppDataDirs()) {
-    const p = join(appData, 'brain', convId, '.system_generated', 'logs', fname);
-    if (existsSync(p)) return p;
+    for (const fname of candidates) {
+      const p = join(appData, 'brain', convId, '.system_generated', 'logs', fname);
+      if (existsSync(p)) return p;
+    }
   }
   return null;
 }
@@ -105,6 +109,19 @@ function cleanUserPrompt(content, maxLen = 160) {
   };
 }
 
+function createEmptyComp() {
+  return {
+    firstInputTokens: null,
+    initialCharsBeforeFirstCall: 0,
+    systemChars: 0,
+    userChars: 0,
+    assistantChars: 0,
+    thinkingChars: 0,
+    toolCallChars: 0,
+    toolResultChars: 0,
+  };
+}
+
 function createEmptyAcc() {
   return {
     offset: 0,
@@ -123,6 +140,7 @@ function createEmptyAcc() {
     lastPlannerModel: null,
     prevModel: null,
     pendingTps: null, // { modelName, outputTokens, startMs }
+    comp: createEmptyComp(),
     models: new Map(), // name -> { steps, uncached, cacheRead, output, maxContext, tpsOutput, tpsSeconds, tpsSamples }
     sameModel: { count: 0, uncached: 0, cacheRead: 0 },
     switches: { count: 0, uncached: 0, cacheRead: 0 },
@@ -186,6 +204,10 @@ function ingestEvent(acc, ev, byteOffset, byteLength) {
     acc.userTurns += 1;
     acc.turnIndex += 1;
     if (ts) acc.lastUserAt = ts;
+    const rawUserLen = (typeof ev.content === 'string' ? ev.content.length : 0) +
+      (Array.isArray(ev.media) ? ev.media.length * 1200 : 0);
+    acc.comp.userChars += rawUserLen;
+    if (acc.comp.firstInputTokens === null) acc.comp.initialCharsBeforeFirstCall += rawUserLen;
     const { preview, truncated } = cleanUserPrompt(ev.content);
     acc.turns.push({
       turnIndex: acc.turnIndex,
@@ -214,12 +236,24 @@ function ingestEvent(acc, ev, byteOffset, byteLength) {
     return;
   }
 
+  if (type === 'SYSTEM_MESSAGE' || type === 'EPHEMERAL_MESSAGE') {
+    const sysLen = typeof ev.content === 'string' ? ev.content.length : 0;
+    acc.comp.systemChars += sysLen;
+    if (acc.comp.firstInputTokens === null) acc.comp.initialCharsBeforeFirstCall += sysLen;
+    return;
+  }
+
   const hasTokens =
     ev.input_tokens !== undefined ||
     ev.cache_read_tokens !== undefined ||
     ev.output_tokens !== undefined;
 
-  if (!hasTokens) return;
+  if (!hasTokens) {
+    // Tool result steps (GENERIC, etc.)
+    const resLen = typeof ev.content === 'string' ? ev.content.length : 0;
+    acc.comp.toolResultChars += resLen;
+    return;
+  }
 
   const isCheckpoint = type === 'CHECKPOINT';
   const modelName = ev.model || (isCheckpoint ? '<CHECKPOINT>' : '<unknown>');
@@ -238,7 +272,21 @@ function ingestEvent(acc, ev, byteOffset, byteLength) {
 
   if (isCheckpoint) {
     acc.checkpoints += 1;
+    acc.comp = createEmptyComp();
+    const ckLen = typeof ev.content === 'string' ? ev.content.length : 0;
+    acc.comp.systemChars += ckLen;
+    acc.comp.initialCharsBeforeFirstCall += ckLen;
   } else if (type === 'PLANNER_RESPONSE') {
+    if (acc.comp.firstInputTokens === null && totalIn > 0) {
+      acc.comp.firstInputTokens = totalIn;
+    }
+    acc.comp.assistantChars += typeof ev.content === 'string' ? ev.content.length : 0;
+    acc.comp.thinkingChars += typeof ev.thinking === 'string' ? ev.thinking.length : 0;
+    if (Array.isArray(ev.tool_calls) && ev.tool_calls.length > 0) {
+      try {
+        acc.comp.toolCallChars += JSON.stringify(ev.tool_calls).length;
+      } catch {}
+    }
     if (acc.prevModel) {
       if (acc.prevModel === modelName) {
         acc.sameModel.count += 1;
@@ -424,6 +472,35 @@ function loadStats(convId) {
   const sameTotal = acc.sameModel.uncached + acc.sameModel.cacheRead;
   const swTotal = acc.switches.uncached + acc.switches.cacheRead;
 
+  // Estimate context composition since start / last compaction, scaled to exact currentContext.inputTokens
+  const totalCtx = acc.lastContextInput || 0;
+  let composition = [];
+  if (totalCtx > 0) {
+    const c = acc.comp;
+    const estInitDyn = Math.round(c.initialCharsBeforeFirstCall / 3.5);
+    const baseSystem = Math.max(0, Math.min(totalCtx, (c.firstInputTokens || 0) - estInitDyn));
+    const remaining = Math.max(0, totalCtx - baseSystem);
+    const dynSum =
+      c.systemChars + c.userChars + c.assistantChars + c.thinkingChars + c.toolCallChars + c.toolResultChars;
+    const scale = (chars) => (dynSum > 0 ? Math.round((chars / dynSum) * remaining) : 0);
+
+    const rawParts = [
+      { key: 'system', label: 'System', tokens: baseSystem + (dynSum > 0 ? scale(c.systemChars) : remaining) },
+      { key: 'user', label: 'User', tokens: scale(c.userChars) },
+      { key: 'assistant', label: 'Assistant', tokens: scale(c.assistantChars) },
+      { key: 'thinking', label: 'Thinking', tokens: scale(c.thinkingChars) },
+      { key: 'tool_calls', label: 'Tool Calls', tokens: scale(c.toolCallChars) },
+      { key: 'tool_results', label: 'Tool Results', tokens: scale(c.toolResultChars) },
+    ];
+    composition = rawParts
+      .filter((p) => p.tokens > 0)
+      .map((p) => ({
+        ...p,
+        pctOfContext: (p.tokens / totalCtx) * 100,
+        pctOfLimit: (p.tokens / COMPACTION_REF_TOKENS) * 100,
+      }));
+  }
+
   return {
     etag,
     conversationId: convId,
@@ -439,6 +516,7 @@ function loadStats(convId) {
       compactionRef: COMPACTION_REF_TOKENS,
       model: acc.lastContextModel,
       stepIndex: acc.lastContextStep,
+      composition,
     },
     totals: {
       steps,

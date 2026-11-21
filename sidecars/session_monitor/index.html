@@ -194,11 +194,41 @@
       cursor: default;
     }
     .bar-track {
-      height: 7px;
+      position: relative;
+      height: 8px;
       border-radius: 999px;
       background: var(--sm-track-bg);
       overflow: hidden;
+      display: flex;
     }
+    .bar-track::after {
+      content: '';
+      position: absolute;
+      top: 0;
+      right: 0;
+      bottom: 0;
+      width: 15%;
+      border-left: 1px solid rgba(245, 158, 11, 0.5);
+      background: repeating-linear-gradient(
+        -45deg,
+        transparent,
+        transparent 3px,
+        rgba(245, 158, 11, 0.22) 3px,
+        rgba(245, 158, 11, 0.22) 5px
+      );
+      pointer-events: none;
+    }
+    .bar-seg {
+      height: 100%;
+      flex-shrink: 0;
+      transition: width 0.25s ease;
+    }
+    .bar-seg.c-system { background: #8b5cf6; }
+    .bar-seg.c-user { background: #3b82f6; }
+    .bar-seg.c-assistant { background: #10b981; }
+    .bar-seg.c-thinking { background: #f59e0b; }
+    .bar-seg.c-tool_calls { background: #f97316; }
+    .bar-seg.c-tool_results { background: #f43f5e; }
     .bar-fill {
       height: 100%;
       border-radius: 999px;
@@ -209,25 +239,90 @@
     .bar-fill.danger { background: var(--sm-danger); }
     .bar-tooltip {
       position: absolute;
-      left: 50%;
-      top: calc(100% + 4px);
-      transform: translateX(-50%);
-      padding: 4px 8px;
-      border-radius: 6px;
+      left: 0;
+      right: 0;
+      top: calc(100% + 5px);
+      padding: 8px 10px;
+      border-radius: 8px;
       background: var(--sm-popover-bg);
       border: 1px solid var(--sm-border);
-      box-shadow: 0 4px 14px rgba(0, 0, 0, 0.14);
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.16);
       color: var(--sm-fg);
-      font-size: 10px;
+      font-size: 11px;
       font-variant-numeric: tabular-nums;
-      white-space: nowrap;
       pointer-events: none;
       opacity: 0;
-      transition: opacity 0.12s ease;
-      z-index: 25;
+      transform: translateY(-2px);
+      transition: opacity 0.12s ease, transform 0.12s ease;
+      z-index: 35;
     }
     .bar-wrap:hover .bar-tooltip {
       opacity: 1;
+      transform: translateY(0);
+    }
+    .tt-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 11px;
+      font-weight: 600;
+      margin-bottom: 6px;
+      padding-bottom: 5px;
+      border-bottom: 1px solid var(--sm-border);
+    }
+    .tt-head-sub {
+      font-size: 10px;
+      font-weight: 400;
+      color: var(--sm-muted);
+    }
+    .tt-rows {
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+    }
+    .tt-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      font-size: 10px;
+    }
+    .tt-left {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      min-width: 0;
+    }
+    .tt-swatch {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+    .tt-swatch.c-system { background: #8b5cf6; }
+    .tt-swatch.c-user { background: #3b82f6; }
+    .tt-swatch.c-assistant { background: #10b981; }
+    .tt-swatch.c-thinking { background: #f59e0b; }
+    .tt-swatch.c-tool_calls { background: #f97316; }
+    .tt-swatch.c-tool_results { background: #f43f5e; }
+    .tt-swatch.c-free { background: var(--sm-track-bg); border: 1px solid var(--sm-border); }
+    .tt-right {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      font-family: var(--sm-mono);
+      color: var(--sm-muted);
+    }
+    .tt-pct {
+      min-width: 38px;
+      text-align: right;
+      color: var(--sm-fg);
+      font-weight: 600;
+    }
+    .tt-foot {
+      margin-top: 5px;
+      padding-top: 5px;
+      border-top: 1px dashed var(--sm-border);
     }
 
     .meta-line {
@@ -828,7 +923,44 @@
         const pctComp = Math.min(100, ((ctx.inputTokens || 0) / (ctx.compactionRef || 500_000)) * 100);
         const barCls = pctComp >= 85 ? 'danger' : pctComp >= 65 ? 'warn' : '';
 
-        const ctxTooltip = `${fmtTok(ctx.inputTokens)} / ~${fmtTok(ctx.compactionRef)} (${pctComp.toFixed(0)}%) · +${fmtTok(ctx.outputTokens)} out`;
+        const compRef = ctx.compactionRef || 500_000;
+        const usedTok = ctx.inputTokens || 0;
+        const freeTok = Math.max(0, compRef - usedTok);
+        const freePct = Math.max(0, 100 - pctComp);
+        const comp = Array.isArray(ctx.composition) && ctx.composition.length ? ctx.composition : null;
+
+        // Scale segment widths so they sum to pctComp (capped at 100% of bar width)
+        let barInnerHtml = '';
+        if (comp && usedTok > 0) {
+          const scaleFactor = pctComp / 100;
+          barInnerHtml = comp
+            .map((p) => {
+              const w = Math.max(0, p.pctOfContext * scaleFactor);
+              return `<div class="bar-seg c-${esc(p.key)}" style="width:${w.toFixed(2)}%"></div>`;
+            })
+            .join('');
+        } else {
+          barInnerHtml = `<div class="bar-fill ${barCls}" style="width:${pctComp.toFixed(1)}%"></div>`;
+        }
+
+        const ttRowsHtml = comp
+          ? comp
+              .map(
+                (p) => `
+                  <div class="tt-row">
+                    <span class="tt-left"><span class="tt-swatch c-${esc(p.key)}"></span><span>${esc(p.label)}</span></span>
+                    <span class="tt-right"><span>${fmtTok(p.tokens)}</span><span class="tt-pct">${p.pctOfContext.toFixed(1)}%</span></span>
+                  </div>`,
+              )
+              .join('')
+          : '';
+
+        const ttFootHtml = `
+          <div class="tt-row tt-foot">
+            <span class="tt-left"><span class="tt-swatch c-free"></span><span>Free (to ~${fmtTok(compRef)})</span></span>
+            <span class="tt-right"><span>${fmtTok(freeTok)}</span><span class="tt-pct">${freePct.toFixed(1)}%</span></span>
+          </div>`;
+
         ctxCardEl.innerHTML = `
           <div class="ctx-head">
             <span class="ctx-head-left">
@@ -837,9 +969,15 @@
             </span>
             <span class="ctx-meta">${stats.checkpoints || 0} compactions · ${tot.steps || 0} calls</span>
           </div>
-          <div class="bar-wrap" title="${esc(ctxTooltip)}">
-            <div class="bar-track"><div class="bar-fill ${barCls}" style="width:${pctComp.toFixed(1)}%"></div></div>
-            <div class="bar-tooltip">${esc(ctxTooltip)}</div>
+          <div class="bar-wrap">
+            <div class="bar-track">${barInnerHtml}</div>
+            <div class="bar-tooltip">
+              <div class="tt-head">
+                <span>${fmtTok(usedTok)} / ~${fmtTok(compRef)} (${pctComp.toFixed(1)}%)</span>
+                <span class="tt-head-sub">+${fmtTok(ctx.outputTokens)} out</span>
+              </div>
+              <div class="tt-rows">${ttRowsHtml}${ttFootHtml}</div>
+            </div>
           </div>
         `;
 
