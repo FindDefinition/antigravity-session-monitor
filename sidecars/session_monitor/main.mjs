@@ -19,7 +19,10 @@ const ID_RE = /^[0-9a-f-]{8,}$/i;
 const COMPACTION_REF_TOKENS = 500_000;
 const DEFAULT_PAGE_SIZE = 30;
 const MAX_PAGE_SIZE = 100;
-const ALL_KINDS = ['user', 'summary', 'progress', 'compact', 'thought', 'tool'];
+const ALL_KINDS = ['user', 'summary', 'progress', 'async', 'compact', 'thought', 'tool'];
+const BG_TASK_RE = /background task with task id:\s*([^\s]+)/i;
+const SUBAGENT_ID_RE = /Created the following subagent:[\s\S]*?"conversationId"\s*:\s*"([^"]+)"/;
+const MSG_SENDER_RE = /\[Message\][^\n]*\bsender=([^\s]+)/;
 
 function findAppDataDirs() {
   const dataDir = process.env.ANTIGRAVITY_EXECUTABLE_DATA_DIR;
@@ -144,7 +147,8 @@ function createEmptyAcc() {
     models: new Map(), // name -> { steps, uncached, cacheRead, output, maxContext, tpsOutput, tpsSeconds, tpsSamples }
     sameModel: { count: 0, uncached: 0, cacheRead: 0 },
     switches: { count: 0, uncached: 0, cacheRead: 0 },
-    kindCounts: { user: 0, summary: 0, progress: 0, compact: 0, thought: 0, tool: 0 },
+    kindCounts: { user: 0, summary: 0, progress: 0, async: 0, compact: 0, thought: 0, tool: 0 },
+    pendingAsyncIds: new Set(), // Active background tasks & subagents awaiting wakeup SYSTEM_MESSAGE
     turnIndex: -1,
     turns: [], // { turnIndex, stepIndex, createdAt, prompt, replyPreview, replyPriority }
     events: [], // all feed events in chronological order
@@ -237,9 +241,29 @@ function ingestEvent(acc, ev, byteOffset, byteLength) {
   }
 
   if (type === 'SYSTEM_MESSAGE' || type === 'EPHEMERAL_MESSAGE') {
-    const sysLen = typeof ev.content === 'string' ? ev.content.length : 0;
+    const sysContent = typeof ev.content === 'string' ? ev.content : '';
+    const sysLen = sysContent.length;
     acc.comp.systemChars += sysLen;
     if (acc.comp.firstInputTokens === null) acc.comp.initialCharsBeforeFirstCall += sysLen;
+
+    if (type === 'SYSTEM_MESSAGE') {
+      if (sysContent.includes('All your subagents and background tasks have been stopped')) {
+        acc.pendingAsyncIds.clear();
+      } else {
+        const m = MSG_SENDER_RE.exec(sysContent);
+        if (m) {
+          acc.pendingAsyncIds.delete(m[1]);
+          // Retroactive safety net: if the immediately preceding event in the same turn was tagged
+          // `summary` right before an async wakeup message, reclassify it as `async`.
+          const prev = acc.events[acc.events.length - 1];
+          if (prev && prev.kind === 'summary' && prev.turnIndex === Math.max(0, acc.turnIndex)) {
+            prev.kind = 'async';
+            acc.kindCounts.summary = Math.max(0, (acc.kindCounts.summary || 0) - 1);
+            acc.kindCounts.async = (acc.kindCounts.async || 0) + 1;
+          }
+        }
+      }
+    }
     return;
   }
 
@@ -250,8 +274,19 @@ function ingestEvent(acc, ev, byteOffset, byteLength) {
 
   if (!hasTokens) {
     // Tool result steps (GENERIC, etc.)
-    const resLen = typeof ev.content === 'string' ? ev.content.length : 0;
-    acc.comp.toolResultChars += resLen;
+    const resContent = typeof ev.content === 'string' ? ev.content : '';
+    acc.comp.toolResultChars += resContent.length;
+
+    // Deterministically track async background tasks & subagents
+    const bgMatch = BG_TASK_RE.exec(resContent);
+    if (bgMatch) {
+      acc.pendingAsyncIds.add(bgMatch[1]);
+    } else if (ev.status === 'RUNNING') {
+      acc.pendingAsyncIds.add(`step-${ev.step_index}`);
+    } else {
+      const subMatch = SUBAGENT_ID_RE.exec(resContent);
+      if (subMatch) acc.pendingAsyncIds.add(subMatch[1]);
+    }
     return;
   }
 
@@ -328,7 +363,13 @@ function ingestEvent(acc, ev, byteOffset, byteLength) {
     const clipped = clean.length > 220;
     text = clipped ? `${clean.slice(0, 219)}…` : clean;
     truncated = clipped || visibleContent.includes('\n') || hasThinking || hasTruncatedField;
-    kind = tools.length > 0 ? 'progress' : 'summary';
+    if (tools.length > 0) {
+      kind = 'progress';
+    } else if (acc.pendingAsyncIds.size > 0) {
+      kind = 'async';
+    } else {
+      kind = 'summary';
+    }
   } else if (thoughtInfo.preview) {
     text = thoughtInfo.preview;
     isThought = true;
