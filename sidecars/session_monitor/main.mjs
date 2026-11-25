@@ -20,9 +20,9 @@ const COMPACTION_REF_TOKENS = 500_000;
 const DEFAULT_PAGE_SIZE = 30;
 const MAX_PAGE_SIZE = 100;
 const ALL_KINDS = ['user', 'summary', 'progress', 'async', 'compact', 'thought', 'tool'];
-const BG_TASK_RE = /background task with task id:\s*([^\s]+)/i;
-const SUBAGENT_ID_RE = /Created the following subagent:[\s\S]*?"conversationId"\s*:\s*"([^"]+)"/;
-const MSG_SENDER_RE = /\[Message\][^\n]*\bsender=([^\s]+)/;
+const BG_TASK_RE = /background task with task id:\s*([0-9a-f-]+(?:\/[a-z0-9_-]+)?)/i;
+const SUBAGENT_ID_RE = /Created the following subagent:[\s\S]*?"conversationId"\s*:\s*"([0-9a-f-]+)"/i;
+const MSG_SENDER_RE = /\[Message\][^\n]*\bsender=([0-9a-f-]+(?:\/[a-z0-9_-]+)?)/i;
 
 function findAppDataDirs() {
   const dataDir = process.env.ANTIGRAVITY_EXECUTABLE_DATA_DIR;
@@ -207,6 +207,7 @@ function ingestEvent(acc, ev, byteOffset, byteLength) {
   if (type === 'USER_INPUT') {
     acc.userTurns += 1;
     acc.turnIndex += 1;
+    acc.pendingAsyncIds.clear();
     if (ts) acc.lastUserAt = ts;
     const rawUserLen = (typeof ev.content === 'string' ? ev.content.length : 0) +
       (Array.isArray(ev.media) ? ev.media.length * 1200 : 0);
@@ -278,11 +279,9 @@ function ingestEvent(acc, ev, byteOffset, byteLength) {
     acc.comp.toolResultChars += resContent.length;
 
     // Deterministically track async background tasks & subagents
-    const bgMatch = BG_TASK_RE.exec(resContent);
-    if (bgMatch) {
-      acc.pendingAsyncIds.add(bgMatch[1]);
-    } else if (ev.status === 'RUNNING') {
-      acc.pendingAsyncIds.add(`step-${ev.step_index}`);
+    if (ev.status === 'RUNNING') {
+      const bgMatch = BG_TASK_RE.exec(resContent);
+      acc.pendingAsyncIds.add(bgMatch ? bgMatch[1] : `step-${ev.step_index}`);
     } else {
       const subMatch = SUBAGENT_ID_RE.exec(resContent);
       if (subMatch) acc.pendingAsyncIds.add(subMatch[1]);
